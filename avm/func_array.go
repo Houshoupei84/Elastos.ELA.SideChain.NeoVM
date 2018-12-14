@@ -2,6 +2,7 @@ package avm
 
 import (
 	"errors"
+
 	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm/datatype"
 )
 
@@ -11,13 +12,13 @@ func opArraySize(e *ExecutionEngine) (VMState, error) {
 	}
 	itemArr := PopStackItem(e)
 	if _, ok := itemArr.(*datatype.Array); ok {
-		arr := itemArr.GetArray();
+		arr := itemArr.GetArray()
 		err := pushData(e, len(arr))
 		if err != nil {
 			return FAULT, err
 		}
 	} else if _, ok := itemArr.(*datatype.ByteArray); ok {
-		arr := itemArr.GetByteArray();
+		arr := itemArr.GetByteArray()
 		err := pushData(e, len(arr))
 		if err != nil {
 			return FAULT, err
@@ -89,20 +90,16 @@ func opSetItem(e *ExecutionEngine) (VMState, error) {
 	}
 	newItem := PopStackItem(e)
 	key := PopStackItem(e)
-	if _, ok := key.(*datatype.Array); ok {
-		return FAULT,  errors.New("evaluationStack error")
-	}
-
 	itemArr := PopStackItem(e)
 	if _, ok := itemArr.(*datatype.Array); ok {
-		index := key.GetBigInteger();
+		index := key.GetBigInteger()
 		items := itemArr.GetArray()
 		items[index.Int64()] = newItem
 	} else if _,ok := itemArr.(*datatype.Dictionary); ok {
 		itemArr.(*datatype.Dictionary).PutStackItem(key, newItem)
 	} else {
 		items := itemArr.GetByteArray()
-		index := key.GetBigInteger();
+		index := key.GetBigInteger()
 		items[index.Int64()] = newItem.GetByteArray()[0]
 	}
 	return NONE, nil
@@ -110,7 +107,7 @@ func opSetItem(e *ExecutionEngine) (VMState, error) {
 
 func opNewArray(e *ExecutionEngine) (VMState, error) {
 	count := PopInt(e)
-	items := NewStackItems();
+	items := NewStackItems()
 	for i := 0; i < count; i++ {
 		items = append(items, datatype.NewBoolean(false))
 	}

@@ -1,16 +1,16 @@
 package service
 
 import (
-	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/contract"
-
 	"github.com/elastos/Elastos.ELA.SideChain/types"
+	"github.com/elastos/Elastos.ELA.SideChain/service"
 
 	"github.com/elastos/Elastos.ELA.Utility/common"
-	"github.com/elastos/Elastos.ELA.SideChain/service"
+
+	nt "github.com/elastos/Elastos.ELA.SideChain.NeoVM/types"
 )
 
 type DeployInfo struct {
-	Code        contract.FunctionCode
+	Code        nt.FunctionCode
 	Name        string
 	CodeVersion string
 	Author      string
@@ -104,12 +104,9 @@ func GetTXInfo(tx *types.Transaction) *service.TransactionInfo {
 	for i, v := range tx.Outputs {
 		outputs[i].Value = v.Value.String()
 		outputs[i].Index = uint32(i)
-		var address string
-		destroyHash := common.Uint168{}
-		if v.ProgramHash == destroyHash {
-			address = service.DestroyAddress
-		} else {
-			address, _ = v.ProgramHash.ToAddress()
+		address, err := v.ProgramHash.ToAddress()
+		if err != nil {
+			return nil
 		}
 		outputs[i].Address = address
 		outputs[i].AssetID = common.BytesToHexString(common.BytesReverse(v.AssetID.Bytes()))

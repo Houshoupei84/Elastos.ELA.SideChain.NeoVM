@@ -8,9 +8,6 @@ import (
 	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm/errors"
 	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm/datatype"
 	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm/interfaces"
-	"github.com/elastos/Elastos.ELA.Utility/common"
-	"crypto/sha256"
-	"golang.org/x/crypto/ripemd160"
 )
 
 type BigIntSorter []big.Int
@@ -345,6 +342,8 @@ func NewStackItem(data interface{}) (datatype.StackItem, error) {
 	switch data.(type) {
 	case int8, int16, int32, int64, int, uint8, uint16, uint32, uint64, *big.Int, big.Int:
 		stackItem = datatype.NewInteger(ToBigInt(data))
+	case string:
+		stackItem = datatype.NewByteArray([]byte(data.(string)))
 	case bool:
 		stackItem = datatype.NewBoolean(data.(bool))
 	case []byte:
@@ -449,7 +448,7 @@ func PeekStackItem(e *ExecutionEngine) datatype.StackItem  {
 func PeekNInt(i int , e *ExecutionEngine) int {
 	x := PeekNBigInt(i, e)
 	n := int(x.Int64())
-	return n;
+	return n
 }
 
 func PeekNBigInt(i int, e *ExecutionEngine) *big.Int {
@@ -475,7 +474,7 @@ func Peek(e *ExecutionEngine) interface{}  {
 }
 
 func EvaluationStackCount(e *ExecutionEngine) int {
-	return e.evaluationStack.Count();
+	return e.evaluationStack.Count()
 }
 
 func Push(e *ExecutionEngine, element interface{})  {
@@ -489,30 +488,8 @@ func Count(e *ExecutionEngine) int {
 func PushData(e *ExecutionEngine, data interface{})  {
 	d, err := NewStackItem(data)
 	if err != nil {
-		return;
+		log.Error("PushData",err.Error())
+		return
 	}
 	e.evaluationStack.Push(d)
-}
-
-const (
-	pPrefixSmartContract = 0x1c
-)
-
-
-func ToCodeHash(code []byte) (*common.Uint168, error) {
-	if len(code) < 1 {
-		return nil, errors.ErrorProgramCode
-	}
-	hash := sha256.Sum256(code)
-	md160 := ripemd160.New()
-	md160.Write(hash[:])
-	data := md160.Sum([]byte{pPrefixSmartContract})
-	return common.Uint168FromBytes(data)
-}
-
-func UInt168ToUInt160(hash *common.Uint168) []byte {
-	hashBytes := make([]byte, len(hash) - 1)
-	data := hash.Bytes()
-	copy(hashBytes, data[1 : len(hash)])
-	return hashBytes
 }

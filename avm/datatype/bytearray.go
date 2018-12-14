@@ -4,7 +4,6 @@ import (
 	"math/big"
 
 	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm/interfaces"
-
 	"github.com/elastos/Elastos.ELA.Utility/common"
 )
 
@@ -29,7 +28,7 @@ func (ba *ByteArray) Equals(other StackItem) bool {
 	if l1 != l2 {
 		return false
 	}
-	for i:=0; i<l1; i++ {
+	for i := 0; i < l1; i++ {
 		if a1[i] != a2[i] {
 			return false
 		}
@@ -39,12 +38,26 @@ func (ba *ByteArray) Equals(other StackItem) bool {
 
 func (ba *ByteArray) GetBigInteger() *big.Int {
 	var bi big.Int
-	tempBytes := make([]byte, len(ba.value))
+	count := len(ba.value)
+	if count == 0 {
+		return bi.SetInt64(0)
+	}
+	tempBytes := make([]byte, count)
 	copy(tempBytes, ba.value)
-	return bi.SetBytes(common.BytesReverse(tempBytes))
+
+	isNeg := ba.value[count - 1] & 0x80 != 0
+	var addData byte = 0x00
+	if isNeg {
+		addData = 0xff
+	}
+	for i := 0; i < 8 - count; i++ {
+		tempBytes = append(tempBytes, addData)
+	}
+	bi.SetBytes(common.BytesReverse(tempBytes))
+	return &bi
 }
 
-func (ba *ByteArray) GetBoolean() bool{
+func (ba *ByteArray) GetBoolean() bool {
 	for _, b := range ba.value {
 		if b != 0 {
 			return true

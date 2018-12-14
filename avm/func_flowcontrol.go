@@ -1,10 +1,9 @@
 package avm
 
 import (
-	"fmt"
+	"github.com/elastos/Elastos.ELA.Utility/common"
 
 	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm/errors"
-	"github.com/elastos/Elastos.ELA.Utility/common"
 )
 
 func opNop(e *ExecutionEngine) (VMState, error) {
@@ -50,12 +49,13 @@ func opRet(e *ExecutionEngine) (VMState, error) {
 
 func opAppCall(e *ExecutionEngine) (VMState, error) {
 	if e.table == nil {
-		return FAULT, nil
+		return FAULT, errors.ErrTableIsNil
 	}
 	script_hash := e.context.OpReader.ReadBytes(20)
+	script_hash = common.BytesReverse(script_hash)
 	script := e.table.GetScript(script_hash)
 	if script == nil {
-		return FAULT, nil
+		return FAULT, errors.ErrNotFindScript
 	}
 	if e.opCode == TAILCALL {
 		e.invocationStack.Pop()
@@ -66,14 +66,17 @@ func opAppCall(e *ExecutionEngine) (VMState, error) {
 
 func opSysCall(e *ExecutionEngine) (VMState, error) {
 	if e.service == nil {
-		return FAULT, nil
+		return FAULT, errors.ErrServiceIsNil
 	}
-	success := e.service.Invoke(e.context.OpReader.ReadVarString(), e)
-	if success {
+	success, err := e.service.Invoke(e.context.OpReader.ReadVarString(), e)
+	if success && err == nil {
 		return NONE, nil
-	} else {
-		return FAULT, nil
+	} else if err ==  errors.ErrNotSupportSysCall {
+		return FAULT, err
+	} else if err != nil {
+		return FAULT, err
 	}
+	return FAULT, nil
 }
 
 func opCallI(e *ExecutionEngine) (VMState, error) {
@@ -81,7 +84,7 @@ func opCallI(e *ExecutionEngine) (VMState, error) {
 	if err != nil {
 		return FAULT, err
 	}
-	pcount, err := e.context.OpReader.ReadByte();
+	pcount, err := e.context.OpReader.ReadByte()
 	if err != nil {
 		return FAULT, err
 	}
@@ -101,20 +104,25 @@ func opCallE(e *ExecutionEngine) (VMState, error) {
 	if e.table == nil {
 		return FAULT, nil
 	}
-	rvcount, err := e.context.OpReader.ReadByte();
+	_, err := e.context.OpReader.ReadByte()
 	if err != nil {
-		return FAULT ,err
+		return FAULT, err
 	}
-	pcount, err := e.context.OpReader.ReadByte();
+	pcount, err := e.context.OpReader.ReadByte()
 	if err != nil {
 		return FAULT, err
 	}
 	if (e.evaluationStack.Count() < int(pcount)) {
-		return FAULT ,err
+		return FAULT, err
 	}
 	var script_hash []byte
 	if (e.opCode == CALL_ED || e.opCode == CALL_EDT) {
 		script_hash = PopByteArray(e)
+		if len(script_hash) == 21 {
+			hash := make([]byte, 20)
+			copy(hash, script_hash[1 :])
+			script_hash = hash
+		}
 	} else {
 		script_hash = e.context.OpReader.ReadBytes(20)
 		script_hash = common.BytesReverse(script_hash)
@@ -122,14 +130,28 @@ func opCallE(e *ExecutionEngine) (VMState, error) {
 
 	script := e.table.GetScript(script_hash)
 	if script == nil {
-		return FAULT ,err
+		return FAULT, err
 	}
 	if (e.opCode == CALL_ET || e.opCode == CALL_EDT) {
 		e.invocationStack.Pop()
 	}
 
 	e.LoadScript(script, false)
-	fmt.Println("opCallE rvcount:", rvcount)
 
+	return NONE, nil
+}
+
+func OpThrow(e *ExecutionEngine) (VMState, error) {
+	e.state |= FAULT
+	log.Error("contract throw an exception!")
+	return NONE, nil
+}
+
+func OpThowIfNot(e *ExecutionEngine) (VMState, error) {
+	data := PopBoolean(e)
+	if data == false {
+		log.Error("contract throw an exception!")
+		e.state |= FAULT
+	}
 	return NONE, nil
 }

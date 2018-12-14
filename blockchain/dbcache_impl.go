@@ -2,14 +2,13 @@ package blockchain
 
 import (
 	"bytes"
-	"math/big"
 
-	"github.com/elastos/Elastos.ELA.Utility/common"
-
-	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/smartcontract/storage"
-	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/smartcontract/states"
 	"github.com/elastos/Elastos.ELA.SideChain/blockchain"
 	"github.com/elastos/Elastos.ELA.SideChain/database"
+
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/smartcontract/storage"
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/contract/states"
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/smartcontract/enumerators"
 )
 
 type DBCache struct {
@@ -95,30 +94,26 @@ func (cache *DBCache) GetWriteSet() *storage.RWSet {
 	return cache.RWSet
 }
 
-func (cache *DBCache) GetBalance(hash common.Uint168) *big.Int {
-	return big.NewInt(100)
-}
-
-func (cache *DBCache) GetCodeSize(hash common.Uint168) int {
-	return 0
-}
-
-func (cache *DBCache) AddBalance(hash common.Uint168, int2 *big.Int) {
-
-}
-
 func (cache *DBCache) GetChainStoreDb() database.Database {
 	return cache.db
-}
-
-func (cache *DBCache) Suicide(codeHash common.Uint168) bool {
-	skey := storage.KeyToStr(&codeHash)
-	cache.RWSet.Delete(skey)
-	return true
 }
 
 func (cache *DBCache) FindInternal(prefix blockchain.EntryPrefix, keyPrefix string) database.Iterator {
 	k := make([]byte, 0)
 	k = append([]byte{byte(prefix)}, []byte(keyPrefix)...)
-	return cache.db.NewIterator(k)
+	count := len(k)
+	iteratorList := enumerators.NewListIterator()
+	for key, v := range cache.RWSet.WriteSet {
+		kvalue := key[0 : count - 1]
+		if kvalue == keyPrefix {
+			ky := append([]byte{byte(prefix)}, []byte(key)...)
+			iteratorList.Add(ky, v.Item)
+		}
+	}
+	if iteratorList.HashNext() {
+		return iteratorList
+	}
+
+	iter := cache.db.NewIterator(k)
+	return enumerators.NewIterator(iter)
 }

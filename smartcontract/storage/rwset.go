@@ -4,7 +4,7 @@ import (
 	"errors"
 	"bytes"
 
-	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/smartcontract/states"
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/contract/states"
 
 	"github.com/elastos/Elastos.ELA.SideChain/blockchain"
 )
@@ -44,15 +44,16 @@ func (rw *RWSet) Add(prefix blockchain.EntryPrefix, key string, value states.ISt
 		Item:      value,
 		IsDeleted: false,
 	}
-	return nil;
+	return nil
 }
 
-func (rw *RWSet) Delete(key string) {
+func (rw *RWSet) Delete(prefix blockchain.EntryPrefix, key string) {
 	if _, ok := rw.WriteSet[key]; ok {
 		rw.WriteSet[key].Item = nil
 		rw.WriteSet[key].IsDeleted = true
 	} else {
 		rw.WriteSet[key] = &Write{
+			Prefix:    prefix,
 			Key:       key,
 			Item:      nil,
 			IsDeleted: true,

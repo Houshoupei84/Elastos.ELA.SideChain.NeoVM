@@ -4,10 +4,9 @@ import (
 	"io"
 	"bytes"
 	"errors"
+	"fmt"
 
 	"github.com/elastos/Elastos.ELA.SideChain/blockchain"
-	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/store"
-	"fmt"
 )
 
 type IStateValueInterface interface {
@@ -22,10 +21,10 @@ type IStateKeyInterface interface {
 
 var (
 	StatesMap = map[blockchain.EntryPrefix]IStateValueInterface{
-		store.ST_Contract:   new(ContractState),
-		store.ST_Account:    new(AccountState),
-		store.ST_AssetState: new(AssetState),
-		store.ST_Storage:    new(StorageItem),
+		blockchain.ST_Contract:   new(ContractState),
+		blockchain.ST_Account:    new(AccountState),
+		blockchain.ST_AssetState: new(AssetState),
+		blockchain.ST_Storage:    new(StorageItem),
 	}
 )
 
@@ -34,7 +33,7 @@ func GetStateValue(prefix blockchain.EntryPrefix, data []byte) (IStateValueInter
 	state := StatesMap[prefix]
 	if state == nil {
 		fmt.Println("StatesMap not has this key", prefix)
-		return  nil, errors.New("StatesMap not has key")
+		return nil, errors.New("StatesMap not has key")
 	}
 	err := state.Deserialize(r)
 	if err != nil {

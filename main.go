@@ -12,23 +12,29 @@ import (
 	"strconv"
 	"time"
 
-	mp "github.com/elastos/Elastos.ELA.SideChain.NeoVM/mempool"
-	sv "github.com/elastos/Elastos.ELA.SideChain.NeoVM/service"
-	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/store"
-
 	"github.com/elastos/Elastos.ELA.SideChain/mempool"
 	"github.com/elastos/Elastos.ELA.SideChain/pow"
 	"github.com/elastos/Elastos.ELA.SideChain/server"
 	"github.com/elastos/Elastos.ELA.SideChain/service"
-	"github.com/elastos/Elastos.ELA.SideChain/service/httpnodeinfo"
 	"github.com/elastos/Elastos.ELA.SideChain/spv"
 	"github.com/elastos/Elastos.ELA.SideChain/blockchain"
+	"github.com/elastos/Elastos.ELA.SideChain/events"
+	sw "github.com/elastos/Elastos.ELA.SideChain/service/websocket"
 
 	"github.com/elastos/Elastos.ELA.Utility/http/jsonrpc"
 	"github.com/elastos/Elastos.ELA.Utility/http/restful"
 	"github.com/elastos/Elastos.ELA.Utility/http/util"
 	"github.com/elastos/Elastos.ELA.Utility/signal"
 	"github.com/elastos/Elastos.ELA.Utility/elalog"
+	"github.com/elastos/Elastos.ELA.Utility/common"
+
+	mp "github.com/elastos/Elastos.ELA.SideChain.NeoVM/mempool"
+	sv "github.com/elastos/Elastos.ELA.SideChain.NeoVM/service"
+	nc "github.com/elastos/Elastos.ELA.SideChain.NeoVM/blockchain"
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/store"
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/event"
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm/datatype"
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/service/websocket"
 )
 
 const (
@@ -64,21 +70,21 @@ func main() {
 	interrupt := signal.NewInterrupt()
 
 	eladlog.Info("1. BlockChain init")
-	avmChainStore, err := store.NewChainStore(cfg.dataDir, activeNetParams.GenesisBlock)
+	chainStore, err := blockchain.NewChainStore(cfg.DataDir, activeNetParams.GenesisBlock)
 	if err != nil {
 		eladlog.Fatalf("open chain store failed, %s", err)
 		os.Exit(1)
 	}
-	defer avmChainStore.Close()
+	defer chainStore.Close()
 
 	chainCfg := blockchain.Config{
 		ChainParams: activeNetParams,
-		ChainStore:  avmChainStore.ChainStore,
+		ChainStore:  chainStore,
 	}
 
 	mempoolCfg := mempool.Config{
 		ChainParams: activeNetParams,
-		ChainStore:  avmChainStore.ChainStore,
+		ChainStore:  chainStore,
 	}
 	txFeeHelper := mempool.NewFeeHelper(&mempoolCfg)
 	mempoolCfg.FeeHelper = txFeeHelper
@@ -99,13 +105,12 @@ func main() {
 	}
 
 	serviceCfg := spv.Config{
-		DataDir:        filepath.Join(cfg.dataDir, "data_spv"),
+		DataDir:        filepath.Join(cfg.DataDir, "data_spv"),
 		Magic:          activeNetParams.SpvParams.Magic,
 		DefaultPort:    activeNetParams.SpvParams.DefaultPort,
 		SeedList:       activeNetParams.SpvParams.SeedList,
 		Foundation:     activeNetParams.SpvParams.Foundation,
 		GenesisAddress: genesisAddress,
-		TxStore:        spv.NewTxStore(avmChainStore.ChainStore),
 	}
 	spvService, err := spv.NewService(&serviceCfg)
 	if err != nil {
@@ -122,18 +127,36 @@ func main() {
 	chainCfg.CheckTxSanity = txValidator.CheckTransactionSanity
 	chainCfg.CheckTxContext = txValidator.CheckTransactionContext
 
-	chain, err := blockchain.New(&chainCfg)
+	chain, err := nc.NewBlockChain(&chainCfg, txValidator)
 	if err != nil {
 		eladlog.Fatalf("BlockChain initialize failed, %s", err)
 		os.Exit(1)
 	}
+	nc.DefaultChain = chain
+	ledgerStore, err := store.NewLedgerStore(chainStore)
+	if err != nil {
+		eladlog.Fatalf("init DefaultLedgerStore failed, %s", err)
+		os.Exit(1)
+	}
+	chain.Store = ledgerStore
 
-	avmChainStore.Chain = chain
+	flag, err := ledgerStore.Get([]byte(store.AccountPersisFlag))
+	if err != nil {
+		batch := ledgerStore.NewBatch()
+		ledgerStore.PersisAccount(batch, activeNetParams.GenesisBlock)
+		batch.Commit()
+
+		flag = []byte{1}
+		ledgerStore.Put([]byte(store.AccountPersisFlag), flag)
+	}
+
+	sv.Store = ledgerStore
+	sv.Table = store.NewCacheCodeTable(nc.NewDBCache(ledgerStore))
 
 	txPool := mempool.New(&mempoolCfg)
-
+	chainCfg.Validator = blockchain.NewValidator(chain.BlockChain)
 	eladlog.Info("3. Start the P2P networks")
-	server, err := server.New(chain, txPool, activeNetParams)
+	server, err := server.New(chain.BlockChain, txPool, activeNetParams)
 	if err != nil {
 		eladlog.Fatalf("initialize P2P networks failed, %s", err)
 		os.Exit(1)
@@ -147,7 +170,7 @@ func main() {
 		MinerAddr:                 cfg.MinerAddr,
 		MinerInfo:                 cfg.MinerInfo,
 		Server:                    server,
-		Chain:                     chain,
+		Chain:                     chain.BlockChain,
 		TxMemPool:                 txPool,
 		TxFeeHelper:               txFeeHelper,
 		CreateCoinBaseTx:          pow.CreateCoinBaseTx,
@@ -164,17 +187,20 @@ func main() {
 	eladlog.Info("5. --Start the RPC service")
 	service := sv.NewHttpService(&service.Config{
 		Server:                      server,
-		Chain:                       chain,
+		Chain:                       chain.BlockChain,
+		Store:                       ledgerStore.ChainStore,
+		GenesisAddress:              genesisAddress,
 		TxMemPool:                   txPool,
 		PowService:                  powService,
+		SpvService:                  spvService,
+		SetLogLevel:                 setLogLevel,
 		GetBlockInfo:                service.GetBlockInfo,
 		GetTransactionInfo:          sv.GetTransactionInfo,
 		GetTransactionInfoFromBytes: sv.GetTransactionInfoFromBytes,
 		GetTransaction:              service.GetTransaction,
 		GetPayloadInfo:              sv.GetPayloadInfo,
 		GetPayload:                  service.GetPayload,
-	}, avmChainStore, mempoolCfg.ChainParams.ElaAssetId)
-
+	}, mempoolCfg.ChainParams.ElaAssetId)
 	rpcServer := newJsonRpcServer(cfg.HttpJsonPort, service)
 	defer rpcServer.Stop()
 	go func() {
@@ -191,19 +217,20 @@ func main() {
 		}
 	}()
 
-	if cfg.HttpInfoStart {
-		go httpnodeinfo.New(&httpnodeinfo.Config{
-			NodePort:     cfg.DefaultPort,
-			HttpJsonPort: cfg.HttpJsonPort,
-			HttpRestPort: cfg.HttpRestPort,
-			Chain:        chain,
-			Server:       server,
-		}).Start()
-	}
+	socketServer := newWebSocketServer(cfg.HttpWsPort, service.HttpService)
+	defer socketServer.Server.Stop()
+	go func() {
+		if err := socketServer.Server.Start(); err != nil {
+			sockLog.Errorf("Start HttpSocket server failed, %s", err.Error())
+		}
+	}()
 
 	if cfg.PrintSyncState {
-		go printSyncState(avmChainStore.ChainStore, server)
+		go printSyncState(ledgerStore.ChainStore, server)
 	}
+
+	events.Subscribe(handleRunTimeEvents)
+	events.Subscribe(socketServer.OnEvent)
 
 	<-interrupt.C
 }
@@ -220,20 +247,24 @@ func newJsonRpcServer(port uint16, service *sv.HttpServiceExtend) *jsonrpc.Serve
 	s.RegisterAction("getrawtransaction", service.GetRawTransaction, "txid", "verbose")
 	s.RegisterAction("getneighbors", service.GetNeighbors)
 	s.RegisterAction("getnodestate", service.GetNodeState)
-	s.RegisterAction("sendtransactioninfo", service.SendTransactionInfo)
+	s.RegisterAction("sendrechargetransaction", service.SendRechargeToSideChainTxByHash)
 	s.RegisterAction("sendrawtransaction", service.SendRawTransaction, "data")
 	s.RegisterAction("getbestblockhash", service.GetBestBlockHash)
 	s.RegisterAction("getblockcount", service.GetBlockCount)
 	s.RegisterAction("getblockbyheight", service.GetBlockByHeight, "height")
-	s.RegisterAction("getdestroyedtransactions", service.GetDestroyedTransactionsByHeight, "height")
+	s.RegisterAction("getwithdrawtransactionsbyheight", service.GetWithdrawTransactionsByHeight, "height")
 	s.RegisterAction("getexistdeposittransactions", service.GetExistDepositTransactions)
-	s.RegisterAction("gettransactioninfo", service.GetTransactionInfoByHash)
+	s.RegisterAction("getwithdrawtransaction", service.GetWithdrawTransactionByHash, "txid")
 	s.RegisterAction("submitsideauxblock", service.SubmitAuxBlock, "blockhash", "auxpow")
 	s.RegisterAction("createauxblock", service.CreateAuxBlock, "paytoaddress")
 	s.RegisterAction("togglemining", service.ToggleMining, "mining")
 	s.RegisterAction("discretemining", service.DiscreteMining, "count")
-	s.RegisterAction("listunspent",service.ListUnspent, "addresses")
+	s.RegisterAction("listunspent", service.ListUnspent, "addresses")
+	s.RegisterAction("getreceivedbyaddress", service.GetReceivedByAddress, "address", "assetid")
 
+	s.RegisterAction("invokescript", service.InvokeScript, "script", "returntype")
+	s.RegisterAction("invokefunction", service.InvokeFunction, "scripthash", "operation", "params", "returntype")
+	s.RegisterAction("getOpPrice", service.GetOpPrice, "op", "args")
 	return s
 }
 
@@ -309,6 +340,15 @@ func newRESTfulServer(port uint16, service *service.HttpService) *restful.Server
 	return s
 }
 
+func newWebSocketServer(port uint16, service *service.HttpService) *websocket.SocketServer {
+	svrCfg := sw.Config{
+		ServePort: port,
+		Service:   service,
+	}
+	server := websocket.NewSocketServer(&svrCfg)
+	return server
+}
+
 func printSyncState(db *blockchain.ChainStore, server server.Server) {
 	logger := elalog.NewBackend(logWriter).Logger("STAT",
 		elalog.LevelInfo)
@@ -332,5 +372,43 @@ func printSyncState(db *blockchain.ChainStore, server server.Server) {
 		}
 		buf.WriteString("]")
 		logger.Info(buf.String())
+	}
+}
+
+func handleRunTimeEvents(et *events.Event) {
+	if et.Type == event.ETRunTimeNotify {
+		notifyInfo(et.Data.(datatype.StackItem))
+	} else if et.Type == event.ETRunTimeLog {
+		data := et.Data.(datatype.StackItem)
+		avmlog.Info("onRunTimeLog:", string(data.GetByteArray()))
+	}
+}
+
+func notifyInfo(item datatype.StackItem) {
+	switch item.(type) {
+	case *datatype.Boolean:
+		avmlog.Info("notifyInfo:", item.GetBoolean())
+	case *datatype.Integer:
+		avmlog.Info("notifyInfo:", item.GetBigInteger())
+	case *datatype.ByteArray:
+		avmlog.Info("notifyInfo:", common.BytesToHexString(item.GetByteArray()))
+	case *datatype.GeneralInterface:
+		interop := item.GetInterface()
+		buf := bytes.NewBuffer([]byte{})
+		interop.Serialize(buf)
+		avmlog.Info(common.BytesToHexString(buf.Bytes()))
+	case *datatype.Array:
+		items := item.GetArray()
+		if len(items) == 4 && string(items[0].GetByteArray()) == "transfer" {
+			str := string(items[0].GetByteArray()) + ":\n from:"
+			str += common.BytesToHexString(items[1].GetByteArray()) + " to:"
+			str += common.BytesToHexString(items[2].GetByteArray()) + " value:"
+			str += items[3].GetBigInteger().String()
+			avmlog.Info("notifyInfo:", str)
+			return
+		}
+		for i := 0; i < len(items); i++ {
+			notifyInfo(items[i])
+		}
 	}
 }

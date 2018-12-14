@@ -5,19 +5,18 @@ import (
 	"bytes"
 	"strconv"
 
-	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm/interfaces"
-	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/blockchain"
-	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm/datatype"
-	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/types"
-	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm"
-
 	"github.com/elastos/Elastos.ELA.Utility/common"
 
-	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/contract"
 	"github.com/elastos/Elastos.ELA.SideChain/database"
-
 	st "github.com/elastos/Elastos.ELA.SideChain/types"
+
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm/interfaces"
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm/datatype"
 	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/service"
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/types"
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm"
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/contract"
+	ns "github.com/elastos/Elastos.ELA.SideChain.NeoVM/smartcontract/service"
 )
 
 type SmartContract struct {
@@ -39,7 +38,7 @@ type Context struct {
 	Time           *big.Int
 	BlockNumber    *big.Int
 	SignableData   SignableData
-	StateMachine   blockchain.StateMachine
+	StateMachine   ns.StateMachine
 	DBCache        database.Batch
 	Gas            common.Fixed64
 	ReturnType     contract.ContractParameterType

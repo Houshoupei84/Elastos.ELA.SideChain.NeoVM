@@ -4,21 +4,18 @@ import (
 	"io"
 	_ "sort"
 	"math"
-	"math/big"
-	"encoding/binary"
+
+	"github.com/elastos/Elastos.ELA.Utility/common"
 
 	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm/interfaces"
 	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm/utils"
 	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm/errors"
-	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm/datatype"
-
-	"github.com/elastos/Elastos.ELA.Utility/common"
 )
 
 const (
 	MAXSTEPS                      = -1
 	ratio                         = 100000
-	gasFree                       = 10 * 100000000;
+	gasFree                       = 10 * 100000000
 	StackLimit             uint32 = 2 * 1024
 	MaxItemSize            uint32 = 1024 * 1024
 	MaxArraySize           uint32 = 1024
@@ -35,7 +32,6 @@ func NewExecutionEngine(container interfaces.IDataContainer, crypto interfaces.I
 	testMode bool) *ExecutionEngine {
 	var engine ExecutionEngine
 	engine.crypto = crypto
-
 	engine.dataContainer = container
 
 	engine.table = table
@@ -173,6 +169,13 @@ func (e *ExecutionEngine) LoadScript(script []byte, pushOnly bool) *ExecutionCon
 	return content
 }
 
+func (e *ExecutionEngine) LoadPriceOnlyScript(script []byte) *ExecutionContext {
+	content := NewExecutionContext(script, false, nil)
+	content.GetPriceOnly = true
+	e.invocationStack.Push(content)
+	return content
+}
+
 func (e *ExecutionEngine) Execute() error {
 	e.state = e.state & (^BREAK)
 	for {
@@ -181,6 +184,7 @@ func (e *ExecutionEngine) Execute() error {
 		}
 		err := e.StepInto()
 		if err != nil {
+			log.Error("ExecutionEngine on avm:", err.Error())
 			return err
 		}
 	}
@@ -222,7 +226,7 @@ func (e *ExecutionEngine) StepInto() error {
 
 func (e *ExecutionEngine) ExecuteOp(opCode OpCode, context *ExecutionContext) (VMState, error) {
 	if opCode > PUSH16 && opCode != RET && context.PushOnly {
-		return FAULT, nil
+		return FAULT, errors.ErrBadValue
 	}
 	if opCode > PUSH16 && e.opCount > e.maxSteps && e.maxSteps > 0 {
 		return FAULT, nil
@@ -243,24 +247,13 @@ func (e *ExecutionEngine) ExecuteOp(opCode OpCode, context *ExecutionContext) (V
 		return FAULT, errors.ErrOverLimitStack
 	}
 
-	if !e.checkItemSize(opCode) {
-		return FAULT, nil
+	var elaRatio int64 = 10 //ten times smaller than neogas
+	price := e.getPrice() * ratio / elaRatio
+	if price < 0 {
+		return FAULT, errors.ErrNumericOverFlow
 	}
-
-	if !e.checkArraySize(opCode) {
-		return FAULT, nil
-	}
-
-	if !e.checkInvocationStack(opCode) {
-		return FAULT, nil
-	}
-	if !e.checkBigIntegers(opCode) {
-		return FAULT, nil
-	}
-
-	price := e.getPrice() * ratio
 	e.gasConsumed += price
-	if e.gas < e.gasConsumed {
+	if e.gas < e.gasConsumed && !e.IsTestMode() {
 		return FAULT, errors.ErrOutOfGas
 	}
 
@@ -269,115 +262,17 @@ func (e *ExecutionEngine) ExecuteOp(opCode OpCode, context *ExecutionContext) (V
 		return FAULT, errors.ErrNotSupportOpCode
 	}
 
+	if opExec.Validator != nil {
+		if err := opExec.Validator(e); err != nil {
+			return FAULT, err
+		}
+	}
+
 	state, err := opExec.Exec(e)
 	if err != nil || HALT == state || FAULT == state {
 		return state, err
 	}
 	return NONE, nil
-}
-
-func (e *ExecutionEngine) checkItemSize(opcode OpCode) bool {
-	switch opcode {
-	case PUSHDATA4:
-		if e.CurrentContext().GetInstructionPointer()+4 >= len(e.CurrentContext().Script) {
-			return false
-		}
-		script := make([]byte, 4)
-		copy(script, e.CurrentContext().Script[e.CurrentContext().GetInstructionPointer():e.CurrentContext().GetInstructionPointer()+4])
-		length := binary.LittleEndian.Uint32(script[:])
-		if length > MaxItemSize {
-			return false
-		}
-	case CAT:
-		if e.evaluationStack.Count() < 2 {
-			return false
-		}
-		length := len(PeekNByteArray(0, e)) + len(PeekNByteArray(1, e))
-		if uint32(length) > MaxItemSize {
-			return false
-		}
-	}
-	return true
-}
-
-func (e *ExecutionEngine) checkArraySize(code OpCode) bool {
-	var size int64
-	switch code {
-	case PACK, NEWARRAY, NEWSTRUCT:
-		if e.evaluationStack.Count() == 0 {
-			return false
-		}
-		size = PeekBigInteger(e).Int64()
-	case SETITEM:
-		if e.evaluationStack.Count() < 3 {
-			return false
-		}
-		item := PeekNStackItem(2, e)
-		dic, ok := item.(*datatype.Dictionary)
-		if !ok {
-			return true
-		}
-		key := PeekN(1, e).(datatype.StackItem)
-		if dic.GetValue(key) != nil {
-			return true
-		}
-		size = int64(len(dic.GetMap()))
-	case APPEND:
-		if e.evaluationStack.Count() < 2 {
-			return false
-		}
-		item := PeekNStackItem(1, e)
-		array, ok := item.(*datatype.Array)
-		if !ok {
-			return false
-		}
-		size = int64(len(array.GetArray()) + 1)
-	default:
-		return true
-	}
-	return size <= int64(MaxArraySize)
-}
-
-func (e *ExecutionEngine) checkInvocationStack(code OpCode) bool {
-	switch code {
-	case CALL, APPCALL, CALL_I, CALL_E, CALL_ED:
-		if e.invocationStack.Count() >= MAXInvocationStackSize {
-			return false
-		}
-	}
-	return true
-}
-
-func (e *ExecutionEngine) checkBigIntegers(code OpCode) bool {
-	switch code {
-	case SHL:
-		ishift := PeekNBigInt(0, e).Int64()
-		if ishift > MAX_SHL_SHR || ishift < Min_SHL_SHR {
-			return false
-		}
-		x := PeekNBigInt(1, e).Uint64()
-		v := x << (uint64(ishift))
-		num := new(big.Int)
-		num.SetUint64(v)
-		if !checkBigInteger(num) {
-			return false
-		}
-	case SHR:
-		ishift := PeekNBigInt(0, e).Int64()
-		if ishift > MAX_SHL_SHR || ishift < Min_SHL_SHR {
-			return false
-		}
-		x := PeekNBigInt(1, e).Uint64()
-		v := x >> (uint64(ishift))
-		num := new(big.Int)
-		num.SetUint64(v)
-		if !checkBigInteger(num) {
-			return false
-		}
-	default:
-	}
-	return true
-
 }
 
 func (e *ExecutionEngine) StepOut() {
@@ -459,7 +354,6 @@ func (e *ExecutionEngine) getPrice() int64 {
 		return 100
 	case CHECKMULTISIG:
 		if e.evaluationStack.Count() == 0 {
-
 			return 1
 		}
 		n := PeekBigInteger(e).Int64()
@@ -498,7 +392,7 @@ func (e *ExecutionEngine) getPriceForSysCall() int64 {
 	case "Neo.Blockchain.GetAccount":
 		return 100
 	case "Neo.Blockchain.RegisterValidator":
-		return 1000 * 100000000 / ratio;
+		return 1000 * 100000000 / ratio
 	case "Neo.Blockchain.GetValidators":
 		return 200
 	case "Neo.Blockchain.CreateAsset":
@@ -512,13 +406,13 @@ func (e *ExecutionEngine) getPriceForSysCall() int64 {
 	case "Neo.Transaction.GetReferences":
 		return 200
 	case "Neo.Asset.Create":
-		return 5000 * 100000000 / ratio;
+		return 5000 * 100000000 / ratio
 	case "Neo.Asset.Renew":
 		return PeekBigInteger(e).Int64() * 5000 * 100000000 / ratio
 	case "Neo.Storage.Get":
 		return 100
 	case "Neo.Storage.Put":
-		price := ((len(PeekNByteArray(1, e))+len(PeekNByteArray(2, e))-1)/1024 + 1) * 1000;
+		price := ((len(PeekNByteArray(1, e))+len(PeekNByteArray(2, e))-1)/1024 + 1) * 1000
 		return int64(price)
 	case "Neo.Storage.Delete":
 		return 100

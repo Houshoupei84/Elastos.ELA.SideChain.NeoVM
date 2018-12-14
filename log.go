@@ -5,12 +5,12 @@ import (
 	"os"
 
 	"github.com/elastos/Elastos.ELA.SideChain/blockchain"
-	"github.com/elastos/Elastos.ELA.SideChain/mempool"
+	sm "github.com/elastos/Elastos.ELA.SideChain/mempool"
 	"github.com/elastos/Elastos.ELA.SideChain/netsync"
 	"github.com/elastos/Elastos.ELA.SideChain/peer"
 	"github.com/elastos/Elastos.ELA.SideChain/pow"
 	"github.com/elastos/Elastos.ELA.SideChain/server"
-	"github.com/elastos/Elastos.ELA.SideChain/service"
+	ser "github.com/elastos/Elastos.ELA.SideChain/service"
 	"github.com/elastos/Elastos.ELA.SideChain/spv"
 
 	"github.com/elastos/Elastos.ELA.Utility/elalog"
@@ -18,6 +18,11 @@ import (
 	"github.com/elastos/Elastos.ELA.Utility/http/restful"
 	"github.com/elastos/Elastos.ELA.Utility/p2p/addrmgr"
 	"github.com/elastos/Elastos.ELA.Utility/p2p/connmgr"
+
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm"
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/store"
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/smartcontract/service"
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/service/websocket"
 )
 
 const (
@@ -45,34 +50,59 @@ var (
 	fileWriter = elalog.NewFileWriter(configFileWriter())
 	logWriter  = io.MultiWriter(os.Stdout, fileWriter)
 	backend    = elalog.NewBackend(logWriter, elalog.Llongfile)
+	level, _ = elalog.LevelFromString(cfg.LogLevel)
 
 	admrlog = backend.Logger("ADMR", elalog.LevelOff)
 	cmgrlog = backend.Logger("CMGR", elalog.LevelOff)
-	bcdblog = backend.Logger("BCDB", cfg.LogLevel)
-	txmplog = backend.Logger("TXMP", cfg.LogLevel)
-	synclog = backend.Logger("SYNC", cfg.LogLevel)
-	peerlog = backend.Logger("PEER", cfg.LogLevel)
-	minrlog = backend.Logger("MINR", cfg.LogLevel)
-	spvslog = backend.Logger("SPVS", cfg.LogLevel)
-	srvrlog = backend.Logger("SRVR", cfg.LogLevel)
-	httplog = backend.Logger("HTTP", cfg.LogLevel)
-	rpcslog = backend.Logger("RPCS", cfg.LogLevel)
-	restlog = backend.Logger("REST", cfg.LogLevel)
-	eladlog = backend.Logger("ELAD", cfg.LogLevel)
+	bcdblog = backend.Logger("BCDB", level)
+	txmplog = backend.Logger("TXMP", level)
+	synclog = backend.Logger("SYNC", level)
+	peerlog = backend.Logger("PEER", level)
+	minrlog = backend.Logger("MINR", level)
+	spvslog = backend.Logger("SPVS", level)
+	srvrlog = backend.Logger("SRVR", level)
+	httplog = backend.Logger("HTTP", level)
+	rpcslog = backend.Logger("RPCS", level)
+	restlog = backend.Logger("REST", level)
+	eladlog = backend.Logger("ELAD", level)
+
+	sockLog = backend.Logger("SOCKET", level)
+	avmlog  = backend.Logger("AVM", level)
 )
+
+func setLogLevel(level elalog.Level) {
+	bcdblog.SetLevel(level)
+	txmplog.SetLevel(level)
+	synclog.SetLevel(level)
+	peerlog.SetLevel(level)
+	minrlog.SetLevel(level)
+	spvslog.SetLevel(level)
+	srvrlog.SetLevel(level)
+	httplog.SetLevel(level)
+	rpcslog.SetLevel(level)
+	restlog.SetLevel(level)
+	eladlog.SetLevel(level)
+	sockLog.SetLevel(level)
+	avmlog.SetLevel(level)
+}
 
 // The default amount of logging is none.
 func init() {
 	addrmgr.UseLogger(admrlog)
 	connmgr.UseLogger(cmgrlog)
 	blockchain.UseLogger(bcdblog)
-	mempool.UseLogger(txmplog)
+	sm.UseLogger(txmplog)
 	netsync.UseLogger(synclog)
 	peer.UseLogger(peerlog)
 	server.UseLogger(srvrlog)
 	pow.UseLogger(minrlog)
 	spv.UseLogger(spvslog)
-	service.UseLogger(httplog)
+	ser.UseLogger(httplog)
 	jsonrpc.UseLogger(rpcslog)
 	restful.UseLogger(restlog)
+
+	avm.UseLogger(avmlog)
+	store.UseLogger(avmlog)
+	service.UseLogger(avmlog)
+	websocket.UseLogger(sockLog)
 }

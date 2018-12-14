@@ -1,15 +1,13 @@
 package storage
 
 import (
-	"math/big"
-
 	"github.com/elastos/Elastos.ELA.Utility/common"
 
 	"github.com/elastos/Elastos.ELA.SideChain/blockchain"
-
-	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm"
-	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/smartcontract/states"
 	"github.com/elastos/Elastos.ELA.SideChain/database"
+
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/contract/states"
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/params"
 )
 
 type DBCache interface {
@@ -17,10 +15,6 @@ type DBCache interface {
 	TryGet(prefix blockchain.EntryPrefix, key string) (states.IStateValueInterface, error)
 	TryDelete(prefix blockchain.EntryPrefix, key string) bool
 	GetWriteSet() *RWSet
-	GetBalance(common.Uint168) *big.Int
-	GetCodeSize(common.Uint168) int
-	AddBalance(common.Uint168, *big.Int)
-	Suicide(codeHash common.Uint168) bool
 	FindInternal(prefix blockchain.EntryPrefix, keyPrefix string) database.Iterator
 }
 
@@ -43,7 +37,7 @@ func (cloneCache *CloneCache) GetInnerCache() DBCache {
 func (cloneCache *CloneCache) Commit() {
 	for _, v := range cloneCache.innerCache.GetWriteSet().WriteSet {
 		if v.IsDeleted {
-			cloneCache.innerCache.GetWriteSet().Delete(v.Key)
+			cloneCache.innerCache.GetWriteSet().Delete(v.Prefix, v.Key)
 		} else {
 			cloneCache.innerCache.GetWriteSet().Add(v.Prefix, v.Key, v.Item)
 		}
@@ -59,8 +53,8 @@ func (cloneCache *CloneCache) TryGet(prefix blockchain.EntryPrefix, key string) 
 }
 
 func (cloneCache *CloneCache) TryDelete(prefix blockchain.EntryPrefix, hash common.Uint168) bool {
-	keyStr := string(avm.UInt168ToUInt160(&hash))
-	cloneCache.innerCache.GetWriteSet().Delete(keyStr)
+	keyStr := string(params.UInt168ToUInt160(&hash))
+	cloneCache.innerCache.GetWriteSet().Delete(prefix, keyStr)
 	result := cloneCache.dbCache.TryDelete(prefix, keyStr)
 	return result
 }

@@ -1,24 +1,27 @@
-package blockchain
+package service
 
 import (
 	"math/big"
 	"errors"
 	"io"
 	"bytes"
-	"fmt"
 
 	"github.com/elastos/Elastos.ELA.Utility/common"
 	"github.com/elastos/Elastos.ELA.Utility/crypto"
 
+	st "github.com/elastos/Elastos.ELA.SideChain/types"
+	"github.com/elastos/Elastos.ELA.SideChain/database"
+	"github.com/elastos/Elastos.ELA.SideChain/events"
+
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/blockchain"
 	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/contract"
-	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/smartcontract/states"
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/contract/states"
 	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/smartcontract/enumerators"
 	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm/datatype"
 	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/avm"
-
-
-	st "github.com/elastos/Elastos.ELA.SideChain/types"
-	"github.com/elastos/Elastos.ELA.SideChain/database"
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/types"
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/event"
+	"github.com/elastos/Elastos.ELA.SideChain.NeoVM/params"
 )
 
 type StateReader struct {
@@ -27,6 +30,8 @@ type StateReader struct {
 
 func NewStateReader() *StateReader {
 	var stateReader StateReader
+
+	stateReader.serviceMap = make(map[string]func(*avm.ExecutionEngine) bool, 0)
 
 	stateReader.Register("Neo.Runtime.GetTrigger", stateReader.RuntimeGetTrigger)
 	stateReader.Register("Neo.Runtime.CheckWitness", stateReader.RuntimeCheckWitness)
@@ -45,7 +50,7 @@ func NewStateReader() *StateReader {
 	stateReader.Register("Neo.Blockchain.GetValidators", stateReader.BlockChainGetValidators)
 	stateReader.Register("Neo.Blockchain.GetAsset", stateReader.BlockChainGetAsset)
 
-	stateReader.Register("Neo.Header.GetIndex", stateReader.HeaderGetHeight);
+	stateReader.Register("Neo.Header.GetIndex", stateReader.HeaderGetHeight)
 	stateReader.Register("Neo.Header.GetHash", stateReader.HeaderGetHash)
 	stateReader.Register("Neo.Header.GetVersion", stateReader.HeaderGetVersion)
 	stateReader.Register("Neo.Header.GetPrevHash", stateReader.HeaderGetPrevHash)
@@ -95,13 +100,13 @@ func NewStateReader() *StateReader {
 
 	stateReader.Register("Neo.Storage.GetContext", stateReader.StorageGetContext)
 	stateReader.Register("Neo.Storage.GetReadOnlyContext", stateReader.StorageGetReadOnlyContext)
-	stateReader.Register("Neo.StorageContext.AsReadOnly", stateReader.StorageContextAsReadOnly);
+	stateReader.Register("Neo.StorageContext.AsReadOnly", stateReader.StorageContextAsReadOnly)
 
-	stateReader.Register("Neo.Iterator.Key", stateReader.IteratorKey);
-	stateReader.Register("Neo.Iterator.Next", stateReader.EnumeratorNext);
-	stateReader.Register("Neo.Iterator.Value", stateReader.EnumeratorValue);
-	stateReader.Register("Neo.Iterator.Keys", stateReader.IteratorKeys);
-	stateReader.Register("Neo.Iterator.Values", stateReader.IteratorValues);
+	stateReader.Register("Neo.Iterator.Key", stateReader.IteratorKey)
+	stateReader.Register("Neo.Iterator.Next", stateReader.EnumeratorNext)
+	stateReader.Register("Neo.Iterator.Value", stateReader.EnumeratorValue)
+	stateReader.Register("Neo.Iterator.Keys", stateReader.IteratorKeys)
+	stateReader.Register("Neo.Iterator.Values", stateReader.IteratorValues)
 
 
 	return &stateReader
@@ -112,7 +117,7 @@ func (s *StateReader) Register(methodName string, handler func(engine *avm.Execu
 		return false
 	}
 	s.serviceMap[methodName] = handler
-	return true;
+	return true
 }
 
 func (s *StateReader) GetServiceMap() map[string]func(*avm.ExecutionEngine) bool {
@@ -125,33 +130,23 @@ func (s *StateReader) RuntimeGetTrigger(e *avm.ExecutionEngine) bool {
 }
 
 func (s *StateReader) RuntimeNotify(e *avm.ExecutionEngine) bool {
-	//item := avm.PopStackItem(e)
-
+	item := avm.PopStackItem(e)
+	events.Notify(event.ETRunTimeNotify, item)
 	return true
 }
 
 func (s *StateReader) RuntimeLog(e *avm.ExecutionEngine) bool {
 	data := avm.PopStackItem(e)
-	fmt.Println(data)
+	events.Notify(event.ETRunTimeLog, data)
 	return true
 }
 
 func (s *StateReader) RuntimeGetTime(e *avm.ExecutionEngine) bool {
-	//var height uint32 = 0
-
-	//if DefaultLedger != nil {
-	//	height = DefaultLedger.Blockchain.BlockHeight
-	//	hash, err := DefaultLedger.Store.GetBlockHash(height)
-	//	if err != nil {
-	//		block, gerr := GetGenesisBlock()
-	//		if gerr != nil {
-	//			return false
-	//		}
-	//		hash = block.Hash()
-	//	}
-	//	header, err := DefaultLedger.Store.GetHeader(hash)
-	//	avm.PushData(e, header.Timestamp)
-	//}
+	if blockchain.DefaultChain == nil {
+		return false
+	}
+	timeStamp := blockchain.DefaultChain.BestChain.Timestamp
+	avm.PushData(e, timeStamp)
 	return true
 }
 
@@ -202,11 +197,13 @@ func (s *StateReader) DerializeStackItem(r io.Reader) (datatype.StackItem, error
 		}
 		return datatype.NewBoolean(bytes), nil
 	case datatype.TYPE_Integer:
-		data, err := common.ReadUint64(r)
+		bytes, err := common.ReadVarBytes(r, avm.MAX_BIGINTEGER, "StateReader DerializeStackItem TYPE_Integer")
 		if err != nil {
 			return nil, err
 		}
-		return datatype.NewInteger(big.NewInt(int64(data))), nil
+		bint := new(big.Int)
+		bint.SetBytes(bytes)
+		return datatype.NewInteger(bint), nil
 	case datatype.TYPE_Array, datatype.TYPE_Struct:
 		len, err := common.ReadVarUint(r, 0x00)
 		if err != nil {
@@ -249,16 +246,16 @@ func (s *StateReader) SerializeStackItem(item datatype.StackItem, w io.Writer) {
 		w.Write(item.GetByteArray())
 	case *datatype.Integer:
 		w.Write([]byte{byte(datatype.TYPE_Integer)})
-		common.WriteUint64(w, item.GetBigInteger().Uint64())
+		common.WriteVarBytes(w, item.GetBigInteger().Bytes())
 	case *datatype.ByteArray:
 		w.Write([]byte{byte(datatype.TYPE_ByteArray)})
 		common.WriteVarBytes(w, item.GetByteArray())
 	case *datatype.GeneralInterface:
 		w.Write([]byte{byte(datatype.TYPE_InteropInterface)})
-		w.Write(item.GetByteArray());
+		w.Write(item.GetByteArray())
 	case *datatype.Array:
 		w.Write([]byte{byte(datatype.TYPE_Array)})
-		items := item.GetArray();
+		items := item.GetArray()
 		common.WriteVarUint(w, (uint64(len(items))))
 		for i := 0; i < len(items); i++ {
 			s.SerializeStackItem(items[i], w)
@@ -266,7 +263,7 @@ func (s *StateReader) SerializeStackItem(item datatype.StackItem, w io.Writer) {
 	case *datatype.Dictionary:
 		dict := item.(*datatype.Dictionary)
 		w.Write([]byte{byte(datatype.TYPE_Map)})
-		dictMap := dict.GetMap();
+		dictMap := dict.GetMap()
 		common.WriteVarUint(w, (uint64(len(dictMap))))
 		for key := range dictMap {
 			s.SerializeStackItem(key, w)
@@ -275,18 +272,51 @@ func (s *StateReader) SerializeStackItem(item datatype.StackItem, w io.Writer) {
 	}
 }
 
-func (s *StateReader) CheckWitnessHash(engine *avm.ExecutionEngine, programHash common.Uint168) (bool, error) {
+func (s *StateReader) CheckWitnessHash160(engine *avm.ExecutionEngine, programHash []byte) (bool, error) {
 	if engine.GetDataContainer() == nil {
 		return false, errors.New("CheckWitnessHash getDataContainer is null")
 	}
 
-	//tx := engine.GetDataContainer().(*st.Transaction)
-	//hashForVerify, err := GetTxProgramHashes(tx)
-	//if err != nil {
-	//	return false, err
-	//}
-	//return contains(hashForVerify, programHash), nil
-	return false, nil
+	if len(programHash) != 20 {
+		return false, errors.New("CheckWitnessHash programHash length is not 20")
+	}
+
+	tx := engine.GetDataContainer().(*st.Transaction)
+	hashForVerify, err := blockchain.DefaultChain.Validator.TxProgramHashes(tx)
+	if err != nil {
+		return false, err
+	}
+
+	var index int
+	for _, v := range hashForVerify {
+		p1 := v.Bytes()[1:]
+		for i, x := range p1 {
+			if x != programHash[i] {
+				break
+			}
+			index = i
+		}
+	}
+	if index == len(programHash) - 1 {
+		return true, nil
+	}
+	return false, errors.New("can't find programhash" + common.BytesToHexString(programHash))
+}
+
+func (s *StateReader) CheckWitnessHash(engine *avm.ExecutionEngine, programHash common.Uint168) (bool, error) {
+	if engine.GetDataContainer() == nil {
+		return false, errors.New("CheckWitnessHash getDataContainer is null")
+	}
+	tx := engine.GetDataContainer().(*st.Transaction)
+	hashForVerify, err := blockchain.DefaultChain.Validator.TxProgramHashes(tx)
+	if err != nil {
+		return false, err
+	}
+	ret := contains(hashForVerify, programHash)
+	if !ret {
+		return ret, errors.New("can't find programhash" + programHash.String())
+	}
+	return ret, nil
 }
 
 func (s *StateReader) CheckWitnessPublicKey(engine *avm.ExecutionEngine, publicKey *crypto.PublicKey) (bool, error) {
@@ -294,7 +324,7 @@ func (s *StateReader) CheckWitnessPublicKey(engine *avm.ExecutionEngine, publicK
 	if err != nil {
 		return false, err
 	}
-	h, err := crypto.ToProgramHash(c)
+	h, err := params.ToProgramHash(c)
 	if err != nil {
 		return false, err
 	}
@@ -314,13 +344,7 @@ func (s *StateReader) RuntimeCheckWitness(e *avm.ExecutionEngine) bool {
 		}
 		result, err = s.CheckWitnessHash(e, *program)
 	} else if len(data) == 20 {
-		temp := []byte{33}
-		data = append(temp, data...)
-		program, err := common.Uint168FromBytes(data)
-		if err != nil {
-			return false
-		}
-		result, err = s.CheckWitnessHash(e, *program)
+		result, err = s.CheckWitnessHash160(e, data)
 	} else if len(data) == 33 {
 		publickKey, err := crypto.DecodePoint(data)
 		if err != nil {
@@ -339,9 +363,9 @@ func (s *StateReader) RuntimeCheckWitness(e *avm.ExecutionEngine) bool {
 
 func (s *StateReader) BlockChainGetHeight(e *avm.ExecutionEngine) bool {
 	var i uint32 = 0
-	//if DefaultLedger != nil {
-	//	i = DefaultLedger.Store.GetHeight()
-	//}
+	if blockchain.DefaultChain != nil {
+		i = blockchain.DefaultChain.BestChain.Height
+	}
 	avm.PushData(e, i)
 	return true
 }
@@ -355,20 +379,20 @@ func (s *StateReader) BlockChainGetHeader(e *avm.ExecutionEngine) bool {
 	l := len(data)
 
 	if l <= 5 {
-		//b := new(big.Int)
-		//height := b.SetBytes(common.BytesReverse(data)).Int64()
-		//if DefaultLedger != nil {
-		//	hash, err := DefaultLedger.Store.GetBlockHash((uint32(height)))
-		//	if err != nil {
-		//		return false
-		//	}
-		//	header, err = DefaultLedger.Store.GetHeader(hash)
-		//}
+		b := new(big.Int)
+		height := b.SetBytes(common.BytesReverse(data)).Int64()
+		if blockchain.DefaultChain != nil {
+			hash, err := blockchain.DefaultChain.GetBlockHash((uint32(height)))
+			if err != nil {
+				return false
+			}
+			header, err = blockchain.DefaultChain.GetHeader(hash)
+		}
 	} else if l == 32 {
-		//hash, _ := common.Uint256FromBytes(data)
-		//if DefaultLedger != nil {
-		//	header, err = DefaultLedger.Store.GetHeader(*hash)
-		//}
+		hash, _ := common.Uint256FromBytes(data)
+		if blockchain.DefaultChain != nil {
+			header, err = blockchain.DefaultChain.GetHeader(*hash)
+		}
 	} else {
 		return false
 	}
@@ -387,23 +411,23 @@ func (s *StateReader) BlockChainGetBlock(e *avm.ExecutionEngine) bool {
 	)
 	l := len(data)
 	if l <= 5 {
-		//b := new(big.Int)
-		//height := uint32(b.SetBytes(common.BytesReverse(data)).Int64())
-		//if DefaultLedger != nil {
-		//	hash, err := DefaultLedger.Store.GetBlockHash(height)
-		//	if err != nil {
-		//		return false
-		//	}
-		//	block, err = DefaultLedger.Store.GetBlock(hash)
-		//}
+		b := new(big.Int)
+		height := uint32(b.SetBytes(common.BytesReverse(data)).Int64())
+		if blockchain.DefaultChain != nil {
+			hash, err := blockchain.DefaultChain.GetBlockHash(height)
+			if err != nil {
+				return false
+			}
+			block, err = blockchain.DefaultChain.GetBlockByHash(hash)
+		}
 	} else if l == 32 {
-		//hash, err := common.Uint256FromBytes(data)
-		//if err != nil {
-		//	return false
-		//}
-		//if DefaultLedger != nil {
-		//	block, err = DefaultLedger.Store.GetBlock(*hash)
-		//}
+		hash, err := common.Uint256FromBytes(data)
+		if err != nil {
+			return false
+		}
+		if blockchain.DefaultChain != nil {
+			block, err = blockchain.DefaultChain.GetBlockByHash(*hash)
+		}
 	} else {
 		return false
 	}
@@ -415,42 +439,51 @@ func (s *StateReader) BlockChainGetBlock(e *avm.ExecutionEngine) bool {
 }
 
 func (s *StateReader) BlockChainGetTransaction(e *avm.ExecutionEngine) bool {
-	//d := avm.PopByteArray(e)
-	//hash, err := common.Uint256FromBytes(d)
-	//if err != nil {
-	//	return false
-	//}
-	//tx, _, err := DefaultLedger.Store.GetTransaction(*hash)
-	//if err != nil {
-	//	return false
-	//}
-	//avm.PushData(e, tx)
+	d := avm.PopByteArray(e)
+	hash, err := common.Uint256FromBytes(d)
+	if err != nil {
+		return false
+	}
+	if blockchain.DefaultChain != nil {
+		tx, _, err := blockchain.DefaultChain.GetTransaction(*hash)
+		if err != nil {
+			return false
+		}
+		avm.PushData(e, tx)
+	}
 	return true
 }
 
 func (s *StateReader) BlockchainGetTransactionHeight(e *avm.ExecutionEngine) bool {
-	//d := avm.PopByteArray(e)
-	//hash, err := common.Uint256FromBytes(d)
-	//if err != nil {
-	//	return false
-	//}
-	//_, height, err := DefaultLedger.Store.GetTransaction(*hash)
-	//if err != nil {
-	//	return false
-	//}
-	//avm.PushData(e, height)
+	d := avm.PopByteArray(e)
+	hash, err := common.Uint256FromBytes(d)
+	if err != nil {
+		return false
+	}
+	if blockchain.DefaultChain != nil {
+		_, height, err := blockchain.DefaultChain.GetTransaction(*hash)
+		if err != nil {
+			return false
+		}
+		avm.PushData(e, height)
+	}
 	return true
 }
 
 func (s *StateReader) BlockChainGetAccount(e *avm.ExecutionEngine) bool {
-	//d := avm.PopByteArray(e)
-	//hash, err := common.Uint168FromBytes(d)
-	//if err != nil {
-	//	return false
-	//}
-	//
-	//account, err := DefaultLedger.Store.GetAccount(*hash)
-	//avm.PushData(e, account)
+	d := avm.PopByteArray(e)
+	hash, err := common.Uint168FromBytes(d)
+	if err != nil {
+		return false
+	}
+
+	if blockchain.DefaultChain != nil {
+		account, err := blockchain.DefaultChain.Store.GetAccount(hash)
+		if err != nil {
+			return false
+		}
+		avm.PushData(e, account)
+	}
 	return true
 }
 
@@ -463,16 +496,17 @@ func (s *StateReader) BlockChainGetValidators(e *avm.ExecutionEngine) bool {
 
 
 func (s *StateReader) BlockChainGetAsset(e *avm.ExecutionEngine) bool {
-	//d := avm.PopByteArray(e)
-	//hash, err := common.Uint256FromBytes(d)
-	//if err != nil {
-	//	return false
-	//}
-	//asset, err := DefaultLedger.Store.GetAsset(*hash)
-	//if err != nil {
-	//	return false
-	//}
-	//avm.PushData(e, asset)
+	d := avm.PopByteArray(e)
+	hash, err := common.Uint256FromBytes(d)
+	if err != nil {
+		return false
+	}
+
+	asset, err := blockchain.DefaultChain.GetAsset(*hash)
+	if err != nil {
+		return false
+	}
+	avm.PushData(e, asset)
 	return true
 }
 
@@ -639,11 +673,12 @@ func (s *StateReader) BlockGetTransactions(e *avm.ExecutionEngine) bool {
 		return false
 	}
 	transactions := d.(*st.Block).Transactions
-	list := make([]datatype.GeneralInterface, 0)
+	list := make([]datatype.StackItem, 0)
 	for _, v := range transactions {
-		list = append(list, *datatype.NewGeneralInterface(v))
+		list = append(list, datatype.NewGeneralInterface(v))
 	}
-	avm.PushData(e, list)
+
+	avm.PushData(e, datatype.NewArray(list))
 	return true
 }
 
@@ -690,9 +725,9 @@ func (s *StateReader) TransactionGetAttributes(e *avm.ExecutionEngine) bool {
 		return false
 	}
 	attributes := d.(*st.Transaction).Attributes
-	list := make([]datatype.GeneralInterface, 0)
+	list := make([]datatype.StackItem, 0)
 	for _, v := range attributes {
-		list = append(list, *datatype.NewGeneralInterface(v))
+		list = append(list, datatype.NewGeneralInterface(v))
 	}
 	avm.PushData(e, list)
 	return true
@@ -732,15 +767,15 @@ func (s *StateReader) TransactionGetReferences(e *avm.ExecutionEngine) bool {
 		return false
 	}
 
-	//references, err := DefaultLedger.Store.GetTxReference(d.(*st.Transaction))
-	//if err != nil {
-	//	return false
-	//}
-	//list := make([]types.StackItem, 0)
-	//for _, v := range references {
-	//	list = append(list, types.NewGeneralInterface(v))//
-	//}
-	//avm.PushData(e, list)
+	references, err := blockchain.DefaultChain.Store.GetTxReference(d.(*st.Transaction))
+	if err != nil {
+		return false
+	}
+	list := make([]datatype.StackItem, 0)
+	for _, v := range references {
+		list = append(list, datatype.NewGeneralInterface(v))
+	}
+	avm.PushData(e, list)
 	return true
 }
 
@@ -749,18 +784,18 @@ func (s *StateReader) TransactionGetUnspentCoins(e *avm.ExecutionEngine) bool {
 	if d == nil {
 		return false
 	}
-	//tx := d.(*st.Transaction)
-	//unspentCoins, err := DefaultLedger.Store.GetUnspents(tx.Hash())
-	//if err != nil {
-	//	return false
-	//}
-	//
-	//list := make([]types.StackItem, 0)
-	//for _, v := range unspentCoins {
-	//	list = append(list, types.NewGeneralInterface(v))
-	//}
-	//avm.PushData(e, list)
-	return true;
+	tx := d.(*st.Transaction)
+	unspentCoins, err := blockchain.DefaultChain.Store.GetUnspents(tx.Hash())
+	if err != nil {
+		return false
+	}
+
+	list := make([]datatype.StackItem, 0)
+	for _, v := range unspentCoins {
+		list = append(list, datatype.NewGeneralInterface(v))
+	}
+	avm.PushData(e, list)
+	return true
 }
 
 func (s *StateReader) InvocationTransactionGetScript(e *avm.ExecutionEngine) bool {
@@ -768,13 +803,13 @@ func (s *StateReader) InvocationTransactionGetScript(e *avm.ExecutionEngine) boo
 	if d == nil {
 		return false
 	}
-	//txtype := d.(*st.Transaction).TxType
-	//if txtype != st.Invoke {
-	//	return false
-	//}
-	//payload := d.(*st.Transaction).Payload
-	//script := payload.(*st.PayloadInvoke).Code
-	//avm.PushData(e, script)
+	txtype := d.(*st.Transaction).TxType
+	if txtype != st.Invoke{
+		return false
+	}
+	payload := d.(*st.Transaction).Payload
+	script := payload.(*types.PayloadInvoke).Code
+	avm.PushData(e, script)
 	return true
 }
 
@@ -908,8 +943,16 @@ func (s *StateReader) AssetGetAssetId(e *avm.ExecutionEngine) bool {
 	if d == nil {
 		return false
 	}
-	assetState := d.(*states.AssetState)
-	avm.PushData(e, assetState.AssetId.Bytes())
+	switch d.(type) {
+	case *st.Asset:
+		asset := d.(*st.Asset)
+		avm.PushData(e, asset.Hash().Bytes())
+	case *states.AssetState:
+		assetState := d.(*states.AssetState)
+		avm.PushData(e, assetState.AssetId.Bytes())
+	default:
+		return false
+	}
 	return true
 }
 
@@ -918,8 +961,17 @@ func (s *StateReader) AssetGetAssetType(e *avm.ExecutionEngine) bool {
 	if d == nil {
 		return false
 	}
-	assetState := d.(*states.AssetState)
-	avm.PushData(e, int(assetState.AssetType))
+	switch d.(type) {
+	case *st.Asset:
+		asset := d.(*st.Asset)
+		avm.PushData(e, int(asset.AssetType))
+	case *states.AssetState:
+		assetState := d.(*states.AssetState)
+		avm.PushData(e, int(assetState.AssetType))
+	default:
+		return false
+	}
+
 	return true
 }
 
@@ -928,8 +980,15 @@ func (s *StateReader) AssetGetAmount(e *avm.ExecutionEngine) bool {
 	if d == nil {
 		return false
 	}
-	assetState := d.(*states.AssetState)
-	avm.PushData(e, assetState.Amount.IntValue())
+	switch d.(type) {
+	case *st.Asset:
+		avm.PushData(e, 0)
+	case *states.AssetState:
+		assetState := d.(*states.AssetState)
+		avm.PushData(e, assetState.Amount.IntValue())
+	default:
+		return false
+	}
 	return true
 }
 
@@ -938,8 +997,17 @@ func (s *StateReader) AssetGetAvailable(e *avm.ExecutionEngine) bool {
 	if d == nil {
 		return false
 	}
-	assetState := d.(*states.AssetState)
-	avm.PushData(e, assetState.Avaliable.IntValue())
+	switch d.(type) {
+	case *st.Asset:
+		//asset := d.(*st.Asset)
+		avm.PushData(e, 0)
+	case *states.AssetState:
+		assetState := d.(*states.AssetState)
+		avm.PushData(e, assetState.Avaliable.IntValue())
+	default:
+		return false
+	}
+
 	return true
 }
 
@@ -948,8 +1016,16 @@ func (s *StateReader) AssetGetPrecision(e *avm.ExecutionEngine) bool {
 	if d == nil {
 		return false
 	}
-	assetState := d.(*states.AssetState)
-	avm.PushData(e, int(assetState.Precision))
+	switch d.(type) {
+	case *st.Asset:
+		asset := d.(*st.Asset)
+		avm.PushData(e, int(asset.Precision))
+	case *states.AssetState:
+		assetState := d.(*states.AssetState)
+		avm.PushData(e, int(assetState.Precision))
+	default:
+		return false
+	}
 	return true
 }
 
@@ -958,12 +1034,21 @@ func (s *StateReader) AssetGetOwner(e *avm.ExecutionEngine) bool {
 	if d == nil {
 		return false
 	}
-	assetState := d.(*states.AssetState)
-	owner, err := assetState.Owner.EncodePoint(true)
-	if err != nil {
+	switch d.(type) {
+	case *st.Asset:
+		//asset := d.(*st.Asset)
+		avm.PushData(e, []byte{})
+	case *states.AssetState:
+		assetState := d.(*states.AssetState)
+		owner, err := assetState.Owner.EncodePoint(true)
+		if err != nil {
+			return false
+		}
+		avm.PushData(e, owner)
+	default:
 		return false
 	}
-	avm.PushData(e, owner)
+
 	return true
 }
 
@@ -972,8 +1057,16 @@ func (s *StateReader) AssetGetAdmin(e *avm.ExecutionEngine) bool {
 	if d == nil {
 		return false
 	}
-	assetState := d.(*states.AssetState)
-	avm.PushData(e, assetState.Admin.Bytes())
+	switch d.(type) {
+	case *st.Asset:
+		//asset := d.(*st.Asset)
+		avm.PushData(e, []byte{})
+	case *states.AssetState:
+		assetState := d.(*states.AssetState)
+		avm.PushData(e, assetState.Admin.Bytes())
+	default:
+		return false
+	}
 	return true
 }
 
@@ -982,8 +1075,16 @@ func (s *StateReader) AssetGetIssuer(e *avm.ExecutionEngine) bool {
 	if d == nil {
 		return false
 	}
-	assetState := d.(*states.AssetState)
-	avm.PushData(e, assetState.Issuer.Bytes())
+	switch d.(type) {
+	case *st.Asset:
+		//asset := d.(*st.Asset)
+		avm.PushData(e, []byte{})
+	case *states.AssetState:
+		assetState := d.(*states.AssetState)
+		avm.PushData(e, assetState.Issuer.Bytes())
+	default:
+		return false
+	}
 	return true
 }
 
@@ -1045,13 +1146,13 @@ func (s *StateReader) StorageContextAsReadOnly(e *avm.ExecutionEngine) bool {
 		newContext.IsReadOnly = true
 		avm.PushData(e, newContext)
 	}
-	return true;
+	return true
 }
 
 func (s *StateReader) IteratorKey(e *avm.ExecutionEngine) bool {
 	opInterface := avm.PopInteropInterface(e)
 	if opInterface == nil {
-		return false;
+		return false
 	}
 	iter := opInterface.(database.Iterator)
 	avm.PushData(e, iter.Key())
@@ -1061,7 +1162,7 @@ func (s *StateReader) IteratorKey(e *avm.ExecutionEngine) bool {
 func (s *StateReader) EnumeratorNext(e *avm.ExecutionEngine) bool {
 	opInterface := avm.PopInteropInterface(e)
 	if opInterface == nil {
-		return false;
+		return false
 	}
 	iter := opInterface.(database.Iterator)
 	avm.PushData(e, iter.Next())
@@ -1071,7 +1172,7 @@ func (s *StateReader) EnumeratorNext(e *avm.ExecutionEngine) bool {
 func (s *StateReader) EnumeratorValue(e *avm.ExecutionEngine) bool {
 	opInterface := avm.PopInteropInterface(e)
 	if opInterface == nil {
-		return false;
+		return false
 	}
 	iter := opInterface.(database.Iterator)
 	avm.PushData(e, iter.Value())
@@ -1082,7 +1183,7 @@ func (s *StateReader) IteratorKeys(e *avm.ExecutionEngine) bool {
 
 	opInterface := avm.PopInteropInterface(e)
 	if opInterface == nil {
-		return false;
+		return false
 	}
 	iter := opInterface.(database.Iterator)
 	iterKeys := enumerators.NewIteratorKeys(iter)
@@ -1094,7 +1195,7 @@ func (s *StateReader) IteratorValues(e *avm.ExecutionEngine) bool {
 
 	opInterface := avm.PopInteropInterface(e)
 	if opInterface == nil {
-		return false;
+		return false
 	}
 	iter := opInterface.(database.Iterator)
 	iterValues := enumerators.NewIteratorValues(iter)
